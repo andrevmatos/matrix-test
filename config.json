@@ -1,0 +1,18 @@
+{
+  "matrix": {
+    "server": "https://transport01.raiden.network",
+    "user": {},
+    "rooms": [
+      "#test:transport01.raiden.network"
+    ]
+  },
+  "eth": {
+    "endpoint": "http://localhost:8545",
+    "account": null,
+    "password": false
+  },
+  "server": {
+    "port": 3000,
+    "host": "127.0.0.1"
+  }
+}
