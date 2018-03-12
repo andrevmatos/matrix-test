@@ -1,5 +1,6 @@
 const fs = require('fs'),
       path = require('path'),
+      assert = require('assert'),
       nconf = require('nconf'),
       Web3 = require('web3'),
       MatrixSdk = require('matrix-js-sdk'),
@@ -98,7 +99,7 @@ async function initMatrix(acc) {
     }
   });
 
-  matrix.on("Room.timeline", function(event, room, toStartOfTimeline) {
+  matrix.on("Room.timeline", async function(event, room, toStartOfTimeline) {
     if (toStartOfTimeline) {
         return; // don't print paginated results
     }
@@ -112,10 +113,20 @@ async function initMatrix(acc) {
           sig = body.substr(lastn + 1),
           senderAddr = web3.eth.accounts.recover(msg+'\n'+event.getSender(), sig),
           isValid = event.getSender().toLowerCase().includes(senderAddr.toLowerCase());
-      if (isValid) {
-        console.log("VALID SIGNATURE: [%s]{%s} => '%s'", event.getSender(), senderAddr, msg);
+
+      assert(isValid, JSON.stringify({ body, msg, sig, senderAddr }));
+
+      let user = matrix.getUser(event.getSender());
+      if (user.displayName === user.userId) { // try to update displayname from server
+        user.setDisplayName((await matrix.getProfileInfo(event.getSender(), 'displayname')).displayname);
       }
+      isValid = web3.eth.accounts.recover(user.userId, user.displayName) === senderAddr;
+
+      assert(isValid, JSON.stringify({ userId: user.userId, displayName: user.displayName, senderAddr }));
+
+      console.log("VALID SIGNATURE: [%s]{%s} => '%s'", event.getSender(), senderAddr, msg, );
     } catch (err) {
+      console.debug("INVALID SIGNATURE", event, err);
     }
   });
 

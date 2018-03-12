@@ -6,25 +6,27 @@ import gevent.wsgi
 import logging
 import getpass
 import json
-import socket
 
 from matrix_client.errors import MatrixRequestError
 from web3 import Web3, HTTPProvider
 from flask import Flask, request
+try:
+    from urllib import quote
+except ImportError:
+    from urllib.parse import quote
 
 from gmatrixclient import GMatrixClient
 from utils import Config
 
 log = logging.getLogger(__name__)
-socket.setdefaulttimeout(600)
 
 
 class RaidenMatrix:
     def __init__(self, web3: Web3, config: Config):
         self.web3 = web3
         self.config = config
-        self.account = None
-        self.app = None
+        self.account: str = None
+        self.app: Flask = None
 
     def init_matrix(self, account: str):
         self.account = account
@@ -85,7 +87,7 @@ class RaidenMatrix:
             )
 
         name = self.web3.eth.sign(self.account, text=user['user_id']).hex()
-        self.client.api.set_display_name(user['user_id'], name)
+        self.client.get_user(user['user_id']).set_display_name(name)
 
         for alias in self.config['matrix:rooms']:
             self.client.join_room(alias)
@@ -102,15 +104,26 @@ class RaidenMatrix:
             )
 
         self.client.start_listener_thread()  # greenlet "thread"
+        gevent.spawn(self._typing)  # spawn 1s every 5s typing event greenlet
 
     def handle_message(self, room, event):
+        """Handle text messages sent to listening rooms"""
         if event['type'] != 'm.room.message' or event['content']['msgtype'] != 'm.text':
             return
+
         msg, sig = event['content']['body'].rsplit('\n', 1)
         sender = event['sender']
-        addr = self.web3.eth.account.recoverMessage(text=msg + '\n' + sender, signature=sig)
-        if addr.lower() not in sender:
+        user = self.client.get_user(sender)
+
+        # recover displayname signature
+        addr = self.web3.eth.account.recoverMessage(text=sender, signature=user.get_display_name())
+        # recover msg body (+'\n'+user_id) signature
+        addr2 = self.web3.eth.account.recoverMessage(text=msg + '\n' + sender, signature=sig)
+        # require both be the same address, and be contained in the user_id
+        if addr != addr2 or addr.lower() not in sender:
+            log.debug('INVALID  SIGNATURE %r %r %r', addr, addr2, sender)
             return
+
         log.info("VALID SIGNATURE: [%s]{%s} => '%s'", sender, addr, msg)
 
     def run(self):
@@ -141,6 +154,8 @@ class RaidenMatrix:
         server.serve_forever()
 
     def _send(self):
+        """Flask endpoint to send a signed message to all rooms
+        """
         data = request.get_json()
         msg = json.dumps(data)
         sig = self.web3.eth.sign(self.account, text=msg + '\n' + self.client.user_id).hex()
@@ -149,17 +164,36 @@ class RaidenMatrix:
             room.send_text(msg + '\n' + sig)
         return '\n'.join([self.account, self.client.user_id, sig])
 
+    def _typing(self):
+        """Example on how to call the API directly
+
+        For funcions not implemented in matrix-python-sdk
+        """
+        while True:
+            for room_id in self.client.get_rooms().keys():
+                path = "/rooms/%s/typing/%s" % (
+                    quote(room_id), quote(self.client.user_id),
+                )
+                self.client.api._send(
+                    'PUT',
+                    path,
+                    {'typing': True, 'timeout': 1000}
+                )
+            gevent.sleep(5)
+
 
 def main():
+    # create a config object (able to save changes)
     config = Config('config.json')
 
-    web3 = Web3(HTTPProvider(config['eth:endpoint']))
+    # web3 provider, long timeout for password prompts operations (like sign)
+    web3 = Web3(HTTPProvider(config['eth:endpoint'], request_kwargs={'timeout': 120}))
     accounts = web3.eth.accounts
     assert accounts, 'No accounts found in eth node'
 
     acc, pw = config['eth'].get('account'), config['eth'].get('password')
 
-    if not acc:
+    if not acc:  # prompt for account
         print('Please, type account index to be used:')
         for a in enumerate(accounts):
             print('  [%s] %s' % a)
@@ -172,7 +206,7 @@ def main():
     web3.eth.defaultAccount = acc
 
     try:
-        if pw is False:
+        if pw is False:  # prompt for password
             pw = getpass.getpass('ETH Key Password: ')
         if isinstance(pw, str):
             assert web3.personal.unlockAccount(acc, pw)
@@ -182,7 +216,7 @@ def main():
 
     raiden = RaidenMatrix(web3, config)
     raiden.init_matrix(acc)
-    raiden.run()
+    raiden.run()  # it'll block here
 
 
 if __name__ == "__main__":
